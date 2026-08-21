@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Primal Playground VR v18 Core Reset</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#08111c;color:white;font-family:system-ui,Segoe UI,Arial,sans-serif}
+canvas{display:block}
+#hud{position:fixed;left:12px;top:12px;z-index:10;background:#06101ddd;border:1px solid #ffffff24;border-radius:13px;padding:10px 12px;min-width:220px;backdrop-filter:blur(7px)}
+#hud b{font-size:17px}#hud div{font-size:12px;margin-top:3px}#msg{font-weight:800;min-height:18px;color:#ffe76d}
+#audioBtn{position:fixed;right:12px;top:12px;z-index:12;border:0;border-radius:12px;padding:11px 14px;font-weight:900;background:#62e887;color:#102217;cursor:pointer}
+#help{position:fixed;left:12px;bottom:12px;z-index:10;background:#06101ddd;border-radius:11px;padding:8px 10px;font-size:12px;max-width:520px}
+#cross{position:fixed;left:50%;top:50%;width:9px;height:9px;transform:translate(-50%,-50%);z-index:8;pointer-events:none}
+#cross:before,#cross:after{content:"";position:absolute;background:#fff9}#cross:before{left:4px;width:1px;height:9px}#cross:after{top:4px;width:9px;height:1px}
+@media(max-width:700px){#help{display:none}#hud{min-width:180px}}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"}}</script>
+</head>
+<body>
+<div id="hud"><b>🦍 PRIMAL PLAYGROUND v18</b><div>Map: <span id="mapText">Hub</span></div><div>Mode: <span id="modeText">Casual</span></div><div>Role: <span id="roleText">Normal</span></div><div>Points: <span id="pointsText">0</span></div><div id="msg">Core movement rebuild loaded.</div></div>
+<button id="audioBtn">ENABLE AUDIO</button>
+<div id="cross"></div>
+<div id="help">VR: push against ground/walls with the controllers. X or left-stick click opens the menu. Desktop: WASD, mouse, Space, Shift, M opens menu.</div>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ------------------------------------------------------------
+// RENDERER / XR
+// ------------------------------------------------------------
+const renderer=new THREE.WebGLRenderer({antialias:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=false;
+renderer.xr.enabled=true;
+renderer.xr.setFramebufferScaleFactor(.85);
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+const vrButton=VRButton.createButton(renderer,{requiredFeatures:['local-floor']});
+document.body.appendChild(vrButton);
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x9ed7ff);
+scene.fog=new THREE.Fog(0x9ed7ff,55,130);
+const rig=new THREE.Group();scene.add(rig);
+const camera=new THREE.PerspectiveCamera(72,innerWidth/innerHeight,.035,160);camera.position.set(0,1.65,4);rig.add(camera);
+scene.add(new THREE.HemisphereLight(0xeaffff,0x33442d,2.15));
+const sun=new THREE.DirectionalLight(0xffffff,1.8);sun.position.set(12,22,9);scene.add(sun);
+
+const ui={
+ map:document.getElementById('mapText'),mode:document.getElementById('modeText'),role:document.getElementById('roleText'),
+ points:document.getElementById('pointsText'),msg:document.getElementById('msg'),audio:document.getElementById('audioBtn'),cross:document.getElementById('cross')
+};
+let msgTime=0;function say(t,s=2){ui.msg.textContent=t;msgTime=s}
+
+// ------------------------------------------------------------
+// AUDIO: deliberately lightweight
+// ------------------------------------------------------------
+let audio=null,master=null,musicOn=true,musicT=0,musicStep=0;
+function enableAudio(){
+ if(!audio){audio=new (window.AudioContext||window.webkitAudioContext)();master=audio.createGain();master.gain.value=.28;master.connect(audio.destination)}
+ if(audio.state==='suspended')audio.resume();ui.audio.textContent='AUDIO ON';ui.audio.style.background='#c8ffd5';tone(440,.08,'triangle',.1,150)
+}
+function tone(f=220,d=.1,type='sine',vol=.08,slide=0){if(!audio)return;const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.setValueAtTime(f,audio.currentTime);if(slide)o.frequency.linearRampToValueAtTime(Math.max(30,f+slide),audio.currentTime+d);g.gain.setValueAtTime(vol,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+d);o.connect(g);g.connect(master);o.start();o.stop(audio.currentTime+d)}
+function noise(d=.05,vol=.035){if(!audio)return;const n=Math.max(1,Math.floor(audio.sampleRate*d)),b=audio.createBuffer(1,n,audio.sampleRate),x=b.getChannelData(0);for(let i=0;i<n;i++)x[i]=Math.random()*2-1;const s=audio.createBufferSource(),g=audio.createGain();s.buffer=b;g.gain.value=vol;s.connect(g);g.connect(master);s.start()}
+const snd={touch(){tone(105,.035,'sine',.035,20)},push(){noise(.035,.025)},jump(){tone(150,.08,'square',.065,150)},land(){noise(.055,.045);tone(80,.05,'sine',.04,-20)},tag(){tone(520,.07,'square',.11,250);setTimeout(()=>tone(820,.1,'triangle',.08,150),55)},freeze(){tone(360,.18,'sine',.1,-180)},point(){tone(620,.07,'triangle',.09,250)},button(){tone(420,.04,'square',.05,100)}};
+ui.audio.addEventListener('click',enableAudio);
+function updateMusic(dt){
+ if(!audio||!musicOn)return;musicT-=dt;if(musicT>0)return;musicT=.28;
+ const sets={hub:[196,247,294,330,392,330,294,247,220,262,330,392,440,392,330,262],forest:[174,220,262,330,294,247,220,196,196,247,294,349,330,294,247,220],snow:[220,277,330,440,392,330,277,247,247,294,370,494,440,370,330,294],lava:[146,174,220,233,196,174,155,146,146,185,220,247,220,185,174,155],shop:[262,330,392,494,440,392,330,294,294,370,440,523,494,440,392,330]};
+ const notes=sets[currentArea]||sets.hub,n=notes[musicStep%notes.length];
+ tone(n,.17,'triangle',.018,0);if(musicStep%4===0)tone(n/2,.24,'sine',.014,0);if(musicStep%8===4)noise(.025,.009);musicStep++
+}
+
+// ------------------------------------------------------------
+// SHARED GEOMETRY / MATERIALS
+// ------------------------------------------------------------
+const GEO={box:new THREE.BoxGeometry(1,1,1),cyl:new THREE.CylinderGeometry(1,1,1,10),sphere:new THREE.SphereGeometry(1,12,9),plane:new THREE.PlaneGeometry(1,1)};
+const materialCache=new Map();
+function material(color,rough=.88,metal=0,transparent=false,opacity=1){const k=`${color}_${rough}_${metal}_${transparent}_${opacity}`;if(!materialCache.has(k))materialCache.set(k,new THREE.MeshStandardMaterial({color,roughness:rough,metalness:metal,transparent,opacity}));return materialCache.get(k)}
+
+const areaGroups={hub:new THREE.Group(),forest:new THREE.Group(),snow:new THREE.Group(),lava:new THREE.Group(),shop:new THREE.Group()};
+for(const g of Object.values(areaGroups))scene.add(g);
+const colliders={hub:[],forest:[],snow:[],lava:[],shop:[]};
+const portals=[];const slideColliders=[];const boostPads=[];
+
+function addBox(area,pos,size,color,rot=new THREE.Euler(),opt={}){
+ const m=new THREE.Mesh(GEO.box,material(color,opt.rough??.88,opt.metal??0,opt.transparent??false,opt.opacity??1));m.position.copy(pos);m.rotation.copy(rot);m.scale.copy(size);m.matrixAutoUpdate=true;areaGroups[area].add(m);m.updateMatrixWorld(true);
+ if(opt.collider!==false){const c={type:'box',mesh:m,half:new THREE.Vector3(.5,.5,.5),solid:opt.solid!==false,floor:opt.floor!==false,tag:opt.tag||'',area};syncCollider(c);colliders[area].push(c);if(opt.tag==='slide')slideColliders.push(c)}
+ return m
+}
+function addCylinder(area,pos,r,h,color,opt={}){
+ const m=new THREE.Mesh(GEO.cyl,material(color,opt.rough??.92,opt.metal??0));m.position.copy(pos);m.scale.set(r,h,r);areaGroups[area].add(m);m.updateMatrixWorld(true);
+ if(opt.collider!==false){const c={type:'cylinder',mesh:m,radius:r,halfY:h*.5,solid:opt.solid!==false,floor:opt.floor!==false,tag:opt.tag||'',area};syncCollider(c);colliders[area].push(c)}return m
+}
+function syncCollider(c){c.mesh.updateMatrixWorld(true);c.matrix=c.mesh.matrixWorld.clone();c.inv=c.matrix.clone().invert();c.normalMatrix=new THREE.Matrix3().getNormalMatrix(c.matrix)}
+function makeText(text,w=2,h=.5,bg='#132131',fg='#fff',font=44){const c=document.createElement('canvas');c.width=512;c.height=128;const x=c.getContext('2d');x.fillStyle=bg;x.fillRect(0,0,512,128);x.fillStyle=fg;x.textAlign='center';x.textBaseline='middle';const fs=text.length>16?28:text.length>11?34:font;x.font=`800 ${fs}px system-ui`;x.fillText(text,256,64);const t=new THREE.CanvasTexture(c);t.generateMipmaps=false;t.minFilter=THREE.LinearFilter;const m=new THREE.Mesh(GEO.plane,new THREE.MeshBasicMaterial({map:t,transparent:true}));m.scale.set(w,h,1);return m}
+function sign(area,text,pos,w=3,h=.7,ry=0,bg='#193148'){const m=makeText(text,w,h,bg);m.position.copy(pos);m.rotation.y=ry;areaGroups[area].add(m);return m}
+
+// ------------------------------------------------------------
+// COLLISION QUERIES: visible box/cylinder dimensions are the collider
+// ------------------------------------------------------------
+const V1=new THREE.Vector3(),V2=new THREE.Vector3(),V3=new THREE.Vector3();
+function queryBox(point,c){
+ const p=V1.copy(point).applyMatrix4(c.inv),h=c.half;
+ const q=V2.set(THREE.MathUtils.clamp(p.x,-h.x,h.x),THREE.MathUtils.clamp(p.y,-h.y,h.y),THREE.MathUtils.clamp(p.z,-h.z,h.z));
+ const closest=q.clone().applyMatrix4(c.matrix),outside=point.clone().sub(closest);let dist=outside.length(),normal=new THREE.Vector3();
+ if(dist>1e-6)normal.copy(outside).multiplyScalar(1/dist);else{
+  const scale=c.mesh.scale;
+  const dx=(h.x-Math.abs(p.x))*Math.abs(scale.x),dy=(h.y-Math.abs(p.y))*Math.abs(scale.y),dz=(h.z-Math.abs(p.z))*Math.abs(scale.z);
+  const nLocal=new THREE.Vector3();
+  if(dx<=dy&&dx<=dz){dist=-dx;nLocal.set(Math.sign(p.x)||1,0,0)}else if(dy<=dx&&dy<=dz){dist=-dy;nLocal.set(0,Math.sign(p.y)||1,0)}else{dist=-dz;nLocal.set(0,0,Math.sign(p.z)||1)}
+  normal.copy(nLocal).applyMatrix3(c.normalMatrix).normalize();
+ }
+ return{distance:dist,normal,point:closest,collider:c}
+}
+function queryCylinder(point,c){
+ const center=new THREE.Vector3().setFromMatrixPosition(c.matrix),dx=point.x-center.x,dz=point.z-center.z,dy=point.y-center.y;
+ const radial=Math.hypot(dx,dz),clampedR=Math.min(radial,c.radius),clampedY=THREE.MathUtils.clamp(dy,-c.halfY,c.halfY);
+ const closest=new THREE.Vector3(center.x+(radial>1e-6?dx/radial*clampedR:0),center.y+clampedY,center.z+(radial>1e-6?dz/radial*clampedR:0));
+ const delta=point.clone().sub(closest);let dist=delta.length(),normal=new THREE.Vector3();
+ if(dist>1e-6)normal.copy(delta).normalize();else{const side=c.radius-radial,cap=c.halfY-Math.abs(dy);if(side<=cap){dist=-side;normal.set(dx/(radial||1),0,dz/(radial||1))}else{dist=-cap;normal.set(0,Math.sign(dy)||1,0)}}
+ return{distance:dist,normal,point:closest,collider:c}
+}
+function queryCollider(point,c){return c.type==='box'?queryBox(point,c):queryCylinder(point,c)}
+function nearestSurface(point,area,maxDistance=.3,solidOnly=false){let best=null,bestD=1e9;for(const c of colliders[area]){if(solidOnly&&!c.solid)continue;const q=queryCollider(point,c);if(q.distance<bestD&&q.distance<=maxDistance){best=q;bestD=q.distance}}return best}
+function boxTopAtXZ(c,x,z){
+ const up=new THREE.Vector3(0,1,0).applyMatrix3(c.normalMatrix).normalize();if(up.y<.3)return null;
+ const topCenter=new THREE.Vector3(0,c.half.y,0).applyMatrix4(c.matrix);const y=(up.dot(topCenter)-up.x*x-up.z*z)/up.y;const local=new THREE.Vector3(x,y,z).applyMatrix4(c.inv);
+ if(Math.abs(local.x)<=c.half.x+.04&&Math.abs(local.z)<=c.half.z+.04&&Math.abs(local.y-c.half.y)<.08)return y;return null
+}
+function cylinderTopAtXZ(c,x,z){const center=new THREE.Vector3().setFromMatrixPosition(c.matrix);const dx=x-center.x,dz=z-center.z;if(dx*dx+dz*dz<=c.radius*c.radius)return center.y+c.halfY;return null}
+function supportAt(x,z,footY,area){let best=-Infinity,bestC=null;for(const c of colliders[area]){if(!c.floor)continue;const y=c.type==='box'?boxTopAtXZ(c,x,z):cylinderTopAtXZ(c,x,z);if(y!==null&&y<=footY+.42&&y>best){best=y;bestC=c}}return bestC?{y:best,collider:bestC}:null}
+
+// ------------------------------------------------------------
+// WORLD BUILDING
+// ------------------------------------------------------------
+const spawn={hub:new THREE.Vector3(0,0,10),forest:new THREE.Vector3(0,0,25),snow:new THREE.Vector3(0,0,27),lava:new THREE.Vector3(0,0,28),shop:new THREE.Vector3(0,0,7)};
+function boundaries(area,size=60,height=7,color=0x5c665e){addBox(area,new THREE.Vector3(0,height*.5,-size*.5),new THREE.Vector3(size,height,1),color);addBox(area,new THREE.Vector3(0,height*.5,size*.5),new THREE.Vector3(size,height,1),color);addBox(area,new THREE.Vector3(-size*.5,height*.5,0),new THREE.Vector3(1,height,size),color);addBox(area,new THREE.Vector3(size*.5,height*.5,0),new THREE.Vector3(1,height,size),color)}
+function addPortal(area,name,pos,target,color){const ring=new THREE.Mesh(new THREE.TorusGeometry(1.35,.18,8,22),material(color,.35,.15));ring.position.copy(pos);areaGroups[area].add(ring);sign(area,name,pos.clone().add(new THREE.Vector3(0,2.1,0)),2.4,.55,0,'#172434');portals.push({area,pos:pos.clone(),target,cool:0})}
+
+// HUB
+addBox('hub',new THREE.Vector3(0,-.5,0),new THREE.Vector3(50,1,50),0x58a64f);boundaries('hub',50,6,0x52665a);sign('hub','PRIMAL PLAYGROUND',new THREE.Vector3(0,4,-10),4.5,.8,0,'#214b31');
+for(const [x,z] of [[-17,-12],[17,-12],[-18,12],[18,12],[-8,18],[8,18]]){addCylinder('hub',new THREE.Vector3(x,2.3,z),.7,4.6,0x69452f);const c=new THREE.Mesh(GEO.sphere,material(0x2f8146));c.position.set(x,5.3,z);c.scale.set(2.6,2.1,2.6);areaGroups.hub.add(c)}
+addPortal('hub','FOREST',new THREE.Vector3(-10,1.4,-5),'forest',0x55c56a);addPortal('hub','SNOW',new THREE.Vector3(0,1.4,-5),'snow',0x8fdfff);addPortal('hub','LAVA',new THREE.Vector3(10,1.4,-5),'lava',0xff6a35);addPortal('hub','SHOP',new THREE.Vector3(0,1.4,17),'shop',0xd28cff);
+sign('hub','Press X for mode + map menu',new THREE.Vector3(0,2.4,5),4,.55,0,'#14273a');
+
+// FOREST
+addBox('forest',new THREE.Vector3(0,-.5,0),new THREE.Vector3(70,1,70),0x438c42);boundaries('forest',70,8,0x58635b);sign('forest','GORILLA FOREST',new THREE.Vector3(0,6,-31),4,.7,0,'#244d2d');
+for(const [x,z,r,h] of [[-27,-23,.8,6],[-18,-12,.75,5],[-28,4,.9,7],[-20,22,.8,6],[-8,-25,.75,6],[8,-26,.9,7],[23,-22,.8,6],[28,-4,.9,7],[25,19,.8,6],[10,25,.8,6],[-8,24,.9,7],[-26,18,.75,5],[14,7,.7,5],[-13,5,.8,6]]){addCylinder('forest',new THREE.Vector3(x,h*.5,z),r,h,0x67432e);const crown=new THREE.Mesh(GEO.sphere,material(0x2f7d43));crown.position.set(x,h+1.2,z);crown.scale.set(2.5,2,2.5);areaGroups.forest.add(crown)}
+// Central climb tower
+addCylinder('forest',new THREE.Vector3(0,2,0),4,4,0x68462e);addBox('forest',new THREE.Vector3(0,4.25,0),new THREE.Vector3(8.5,.5,8.5),0x9b754b);
+for(const [x,y,z] of [[-6,1.0,5],[-4,2.1,3],[-2,3.1,1],[5,1.2,-2],[7,2.4,-4],[9,3.6,-6]])addBox('forest',new THREE.Vector3(x,y,z),new THREE.Vector3(2.2,.45,2.2),0x9a744b);
+// Wall-hop canyon
+addBox('forest',new THREE.Vector3(-3.2,4,-18),new THREE.Vector3(.8,8,19),0x74665b);addBox('forest',new THREE.Vector3(3.2,4,-18),new THREE.Vector3(.8,8,19),0x74665b);addBox('forest',new THREE.Vector3(0,8,-25),new THREE.Vector3(7,.6,5),0xa27a4c);
+// Branch-like beams with exact OBB colliders
+function beam(area,a,b,width=.45,color=0x65402b){const mid=a.clone().add(b).multiplyScalar(.5),dir=b.clone().sub(a),len=dir.length();const m=addBox(area,mid,new THREE.Vector3(width,width,len),color);m.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),dir.normalize());m.updateMatrixWorld(true);const c=colliders[area][colliders[area].length-1];syncCollider(c);return m}
+beam('forest',new THREE.Vector3(-20,3,10),new THREE.Vector3(-8,5,5));beam('forest',new THREE.Vector3(-8,5,5),new THREE.Vector3(0,5,0));beam('forest',new THREE.Vector3(0,5,0),new THREE.Vector3(11,6,8));beam('forest',new THREE.Vector3(11,6,8),new THREE.Vector3(22,4,13));
+// Flat stone pillars: same visible cylinder and collider
+for(const [x,y,z,r,h] of [[-23,.7,17,1.7,1.4],[-18,1.3,13,1.5,2.6],[-13,2,10,1.3,4],[19,.8,20,1.7,1.6],[24,1.5,15,1.5,3],[28,2.3,10,1.3,4.6]])addCylinder('forest',new THREE.Vector3(x,h*.5,z),r,h,0x737b76);
+
+// SNOW
+addBox('snow',new THREE.Vector3(0,-.5,0),new THREE.Vector3(72,1,72),0xeaf7ff);boundaries('snow',72,8,0xb9d9ea);sign('snow','SNOW SLIDES',new THREE.Vector3(0,7,-32),4,.7,0,'#31516d');
+for(const [x,z] of [[-28,-23],[-24,18],[-10,-28],[13,-25],[28,-18],[29,14],[-20,28],[5,29],[23,25]]){addCylinder('snow',new THREE.Vector3(x,2.2,z),.55,4.4,0x66544a);const c=new THREE.Mesh(new THREE.ConeGeometry(2.3,5,10),material(0x316850));c.position.set(x,5.2,z);areaGroups.snow.add(c)}
+function slide(area,start,length,drop,rotY,color=0xa9e4ff){const segments=10;for(let i=0;i<segments;i++){const t=(i+.5)/segments;const z=(t-.5)*length;const y=drop*(1-t)+.7;const angle=-Math.atan2(drop,length);const local=new THREE.Vector3(0,y,z).applyAxisAngle(new THREE.Vector3(0,1,0),rotY).add(start);const ramp=addBox(area,local,new THREE.Vector3(3.6,.28,length/segments+.12),color,new THREE.Euler(angle,rotY,0),{tag:'slide',rough:.2});ramp.userData.down=new THREE.Vector3(0,-drop/length,-1).applyAxisAngle(new THREE.Vector3(0,1,0),rotY).normalize();for(const side of [-1,1]){const railLocal=new THREE.Vector3(side*1.9,y+.38,z).applyAxisAngle(new THREE.Vector3(0,1,0),rotY).add(start);addBox(area,railLocal,new THREE.Vector3(.16,.65,length/segments+.12),0xffffff,new THREE.Euler(angle,rotY,0),{floor:false})}}const top=new THREE.Vector3(0,drop+.8,-length*.5).applyAxisAngle(new THREE.Vector3(0,1,0),rotY).add(start);addBox(area,top,new THREE.Vector3(5,.55,5),0xd6efff);for(let i=0;i<9;i++){const stair=new THREE.Vector3(3.8,i*.62+.3,-length*.5+i*.85).applyAxisAngle(new THREE.Vector3(0,1,0),rotY).add(start);addBox(area,stair,new THREE.Vector3(1.7,.38,1.25),0xcbeafa)}}
+slide('snow',new THREE.Vector3(-13,0,-3),15,8,0);slide('snow',new THREE.Vector3(13,0,-9),18,10,Math.PI);slide('snow',new THREE.Vector3(0,0,14),20,11,Math.PI/2);
+for(const [x,y,z] of [[-25,1,-3],[-20,2,2],[-15,3,7],[18,1,15],[23,2,10],[28,3,5]])addCylinder('snow',new THREE.Vector3(x,y*.5,z),1.6,y,0xc7e5f5);
+
+// FLOOR IS LAVA
+addBox('lava',new THREE.Vector3(0,-.7,0),new THREE.Vector3(74,.5,74),0xff3b11,new THREE.Euler(),{floor:false,tag:'lava'});boundaries('lava',74,9,0x3b302d);sign('lava','THE FLOOR IS LAVA',new THREE.Vector3(0,8,-33),4.5,.75,0,'#5a2018');
+const lavaCourse=[[0,.3,24,4,1,4],[-6,1.2,18,3,1,3],[3,2.2,13,3,1,3],[9,3.2,8,3,1,3],[2,4.2,2,4,1,3],[-7,5.1,-4,3,1,3],[-1,6.0,-10,3,1,3],[8,6.8,-16,4,1,3],[0,7.8,-23,6,1,5]];
+for(const [x,y,z,sx,sy,sz] of lavaCourse)addBox('lava',new THREE.Vector3(x,y,z),new THREE.Vector3(sx,sy,sz),0x4a4541);
+addBox('lava',new THREE.Vector3(-4,4,-15),new THREE.Vector3(.7,8,13),0x514844);addBox('lava',new THREE.Vector3(4,4,-15),new THREE.Vector3(.7,8,13),0x514844);
+const goal=addBox('lava',new THREE.Vector3(0,8.6,-28),new THREE.Vector3(7,.5,6),0xffd349);goal.userData.goal=true;
+
+// SHOP
+addBox('shop',new THREE.Vector3(0,-.5,0),new THREE.Vector3(28,1,28),0xb98d63);boundaries('shop',28,6,0x684936);addBox('shop',new THREE.Vector3(0,5.8,0),new THREE.Vector3(28,.4,28),0x5a3c2e,new THREE.Euler(),{floor:false});sign('shop','GORILLA OUTFITTERS',new THREE.Vector3(0,4.5,-12.7),4,.7,0,'#5c2f71');
+addBox('shop',new THREE.Vector3(0,1,-7),new THREE.Vector3(8,2,2),0x6f4b32);addBox('shop',new THREE.Vector3(-9,2,-8),new THREE.Vector3(5,.35,1.6),0x8b6040);addBox('shop',new THREE.Vector3(9,2,-8),new THREE.Vector3(5,.35,1.6),0x8b6040);
+// Stable avatar mirror on wall, no second render pass
+addBox('shop',new THREE.Vector3(10.9,2.6,0),new THREE.Vector3(.18,4.8,7),0x3b3028,new THREE.Euler(),{floor:false});const mirrorSurface=addBox('shop',new THREE.Vector3(10.78,2.6,0),new THREE.Vector3(.05,4.25,6.2),0x9fc6d5,new THREE.Euler(),{collider:false,metal:.55,rough:.2});
+
+// ------------------------------------------------------------
+// CUTE GORILLA MODEL
+// ------------------------------------------------------------
+function cuteMonkey(color=0x7657d8){
+ const root=new THREE.Group(),bodyMat=material(color,.75),faceMat=material(0xd2a67d,.82),eyeMat=material(0xffffff,.4),pupilMat=material(0x171922,.45);
+ const body=new THREE.Mesh(GEO.sphere,bodyMat);body.scale.set(.43,.55,.34);body.position.y=.75;root.add(body);
+ const head=new THREE.Mesh(GEO.sphere,bodyMat);head.scale.set(.37,.36,.35);head.position.y=1.48;root.add(head);
+ const belly=new THREE.Mesh(GEO.sphere,faceMat);belly.scale.set(.29,.34,.10);belly.position.set(0,.73,-.29);root.add(belly);
+ for(const x of [-.14,.14]){const e=new THREE.Mesh(GEO.sphere,eyeMat);e.scale.set(.115,.14,.07);e.position.set(x,1.53,-.31);root.add(e);const p=new THREE.Mesh(GEO.sphere,pupilMat);p.scale.set(.052,.068,.035);p.position.set(x,1.53,-.374);root.add(p);const gl=new THREE.Mesh(GEO.sphere,material(0xffffff,.2));gl.scale.set(.014,.018,.012);gl.position.set(x-.014,1.56,-.408);root.add(gl)}
+ const shoulders=[new THREE.Group(),new THREE.Group()];shoulders[0].position.set(-.33,1.05,0);shoulders[1].position.set(.33,1.05,0);root.add(...shoulders);
+ const arms=[];for(let i=0;i<2;i++){const a=new THREE.Mesh(GEO.cyl,bodyMat);a.scale.set(.105,.7,.105);a.position.y=-.55;shoulders[i].add(a);const hand=new THREE.Mesh(GEO.sphere,bodyMat);hand.scale.set(.18,.16,.18);hand.position.y=-1.28;shoulders[i].add(hand);arms.push({shoulder:shoulders[i],upper:a,hand})}
+ return{root,body,head,arms,color,bodyMat}
+}
+
+// Player body (head hidden in first person; mirror proxy has full head)
+const STORE={get(k,f){try{return localStorage.getItem(k)??f}catch{return f}},set(k,v){try{localStorage.setItem(k,String(v))}catch{}}};
+let playerColor=Number(STORE.get('pp18_color',0x7657d8)),points=Number(STORE.get('pp18_points',0));let gameMode='casual',playerLava=false,playerIce=false,freezeTime=0;
+const player=cuteMonkey(playerColor);rig.add(player.root);player.head.visible=false;for(const child of player.root.children)if(child.position.y>1.2&&child!==player.head)child.visible=false;player.arms[0].shoulder.visible=false;player.arms[1].shoulder.visible=false;
+const playerBodyMaterial=player.body.material;
+
+// Tracked hands and fixed-bend arm rendering
+const hands=[];const controllers=[];const grips=[];
+const armMeshes=[];
+for(let i=0;i<2;i++){
+ const ctrl=renderer.xr.getController(i),grip=renderer.xr.getControllerGrip(i);rig.add(ctrl,grip);controllers.push(ctrl);grips.push(grip);
+ const hand=new THREE.Mesh(GEO.sphere,material(playerColor,.65));hand.scale.setScalar(.14);hand.visible=false;scene.add(hand);
+ const upper=new THREE.Mesh(GEO.cyl,material(playerColor,.7)),lower=new THREE.Mesh(GEO.cyl,material(playerColor,.7));upper.visible=lower.visible=false;rig.add(upper,lower);armMeshes.push({upper,lower});
+ hands.push({grip,hand,raw:new THREE.Vector3(),smooth:new THREE.Vector3(),prev:new THREE.Vector3(),world:new THREE.Vector3(),touch:false,normal:new THREE.Vector3(0,1,0),ready:false});
+}
+function setSegment(mesh,a,b,r=.085){const d=b.clone().sub(a),len=d.length(),mid=a.clone().add(b).multiplyScalar(.5);mesh.position.copy(mid);mesh.scale.set(r,len,r);mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),d.normalize())}
+function updatePlayerVisual(){
+ const head=new THREE.Vector3(),hq=new THREE.Quaternion();camera.getWorldPosition(head);camera.getWorldQuaternion(hq);const f=new THREE.Vector3(0,0,-1).applyQuaternion(hq);f.y=0;if(f.lengthSq()<.001)f.set(0,0,-1);else f.normalize();
+ const localHead=rig.worldToLocal(head.clone());player.root.position.set(localHead.x,localHead.y-1.48,localHead.z);player.root.rotation.y=Math.atan2(-f.x,-f.z);
+ if(renderer.xr.isPresenting){for(let i=0;i<2;i++){const side=i===0?-1:1,shoulder=head.clone().add(new THREE.Vector3(side*.25,-.30,0).applyQuaternion(hq)),hand=hands[i].world.clone();const to=hand.clone().sub(shoulder),max=.73+.73;if(to.length()>max)to.setLength(max);const target=shoulder.clone().add(to);const dir=target.clone().sub(shoulder),bend=new THREE.Vector3(side*.12,-.10,.10).applyQuaternion(hq);const elbow=shoulder.clone().addScaledVector(dir,.5).add(bend);const sl=rig.worldToLocal(shoulder.clone()),el=rig.worldToLocal(elbow.clone()),hl=rig.worldToLocal(target.clone());setSegment(armMeshes[i].upper,sl,el);setSegment(armMeshes[i].lower,el,hl);armMeshes[i].upper.visible=armMeshes[i].lower.visible=true}}
+}
+function setPlayerTint(hex){player.body.material.color.setHex(hex);playerBodyMaterial.color.setHex(hex);for(const h of hands)h.hand.material.color.setHex(hex);for(const a of armMeshes){a.upper.material.color.setHex(hex);a.lower.material.color.setHex(hex)}}
+function refreshTint(){setPlayerTint(playerLava?0xff421f:playerIce?0x4db7ff:playerColor)}
+
+// Fixed forearm score display, never billboards toward camera
+const scoreCanvas=document.createElement('canvas');scoreCanvas.width=256;scoreCanvas.height=96;const scoreCtx=scoreCanvas.getContext('2d');const scoreTex=new THREE.CanvasTexture(scoreCanvas);scoreTex.generateMipmaps=false;scoreTex.minFilter=THREE.LinearFilter;
+const SCORE_ROT=new THREE.Quaternion().setFromEuler(new THREE.Euler(0,Math.PI*.5,0));const score=new THREE.Group(),scoreBack=new THREE.Mesh(GEO.box,material(0x141a22,.55));scoreBack.scale.set(.18,.055,.10);score.add(scoreBack);const scoreFace=new THREE.Mesh(GEO.plane,new THREE.MeshBasicMaterial({map:scoreTex}));scoreFace.scale.set(.16,.075,1);scoreFace.position.z=.055;score.add(scoreFace);score.visible=false;rig.add(score);
+function drawScore(){scoreCtx.fillStyle='#111820';scoreCtx.fillRect(0,0,256,96);scoreCtx.fillStyle='#ffd95a';scoreCtx.font='800 50px system-ui';scoreCtx.textAlign='center';scoreCtx.textBaseline='middle';scoreCtx.fillText(String(points),128,48);scoreTex.needsUpdate=true;ui.points.textContent=points;STORE.set('pp18_points',points)}drawScore();
+function updateScorePosition(){if(!renderer.xr.isPresenting){score.visible=false;return}const a=armMeshes[0].lower;score.visible=a.visible;score.position.copy(a.position);score.quaternion.copy(a.quaternion).multiply(SCORE_ROT);const off=new THREE.Vector3(-.10,0,.045).applyQuaternion(a.quaternion);score.position.add(off)}
+
+// Mirror proxy: cheap and stable
+const mirrorProxy=cuteMonkey(playerColor);mirrorProxy.root.scale.setScalar(1.05);areaGroups.shop.add(mirrorProxy.root);mirrorProxy.root.position.set(10.45,0,0);mirrorProxy.root.rotation.y=-Math.PI/2;
+function updateMirror(){if(currentArea!=='shop')return;const head=new THREE.Vector3();camera.getWorldPosition(head);mirrorProxy.root.position.set(10.45,Math.max(0,rig.position.y),THREE.MathUtils.clamp(-head.z*.28,-2.2,2.2));mirrorProxy.body.material.color.setHex(playerLava?0xff421f:playerIce?0x4db7ff:playerColor);mirrorProxy.head.material.color.setHex(playerLava?0xff421f:playerIce?0x4db7ff:playerColor);for(let i=0;i<2;i++){mirrorProxy.arms[i].shoulder.rotation.x=hands[i].touch?-.45:-.12}}
+
+// ------------------------------------------------------------
+// NPCS: simple, collision-safe steering
+// ------------------------------------------------------------
+const npcs=[];
+function addNPC(name,color,pos){const m=cuteMonkey(color);scene.add(m.root);const n={name,model:m,pos:pos.clone(),vel:new THREE.Vector3(),vy:0,target:pos.clone(),think:0,lava:false,ice:false,freeze:0,anim:Math.random()*10,stuck:0,last:pos.clone(),base:color};n.root=m.root;n.root.position.copy(pos);npcs.push(n);return n}
+addNPC('Milo',0x55a5ff,new THREE.Vector3(-7,0,-4));addNPC('Nova',0xff7bbd,new THREE.Vector3(7,0,-7));addNPC('Kiwi',0x62ca78,new THREE.Vector3(-5,0,8));addNPC('Mango',0xf0a44d,new THREE.Vector3(8,0,6));
+function npcTint(n){const c=n.lava?0xff421f:n.ice?0x4db7ff:n.base;n.model.body.material.color.setHex(c);n.model.head.material.color.setHex(c);for(const a of n.model.arms){a.upper.material.color.setHex(c);a.hand.material.color.setHex(c)}}
+function npcVisible(){return currentArea==='forest'||currentArea==='snow'}
+function horizontalBlocked(pos,r=.34){const p=new THREE.Vector3(pos.x,pos.y+.75,pos.z);for(const c of colliders[currentArea]){if(!c.solid)continue;const q=queryCollider(p,c);if(q.distance<r&&Math.abs(q.normal.y)<.7)return q}return null}
+function moveNPC(n,dir,speed,dt){
+ let step=dir.clone().multiplyScalar(speed*dt),next=n.pos.clone().add(step),hit=horizontalBlocked(next);
+ if(hit){const tangent=dir.clone().sub(hit.normal.clone().multiplyScalar(dir.dot(hit.normal))).setY(0);if(tangent.lengthSq()>.02){tangent.normalize();next=n.pos.clone().addScaledVector(tangent,speed*dt);if(horizontalBlocked(next))next.copy(n.pos)}else next.copy(n.pos);n.stuck+=dt}else n.stuck=Math.max(0,n.stuck-dt);
+ n.pos.x=next.x;n.pos.z=next.z;n.vy-=10*dt;n.pos.y+=n.vy*dt;const sup=supportAt(n.pos.x,n.pos.z,n.pos.y,currentArea);if(sup&&n.pos.y<=sup.y+.08&&n.vy<=0){n.pos.y=sup.y;n.vy=0}else if(n.pos.y<-2){n.pos.copy(spawn[currentArea]);n.vy=0}
+ n.root.position.copy(n.pos);if(dir.lengthSq()>.01)n.root.rotation.y=Math.atan2(-dir.x,-dir.z)
+}
+function updateNPCs(dt){
+ const vis=npcVisible();for(const n of npcs)n.root.visible=vis;if(!vis)return;
+ const playerPos=new THREE.Vector3();camera.getWorldPosition(playerPos);playerPos.y=rig.position.y;
+ for(const n of npcs){n.freeze=Math.max(0,n.freeze-dt);n.think-=dt;if(n.freeze>0)continue;
+  if(n.think<=0){n.think=.32+Math.random()*.2;let target=null;
+   if(gameMode==='infection'){if(n.lava&&!playerLava)target=playerPos;else if(!n.lava){const threats=npcs.filter(x=>x.lava);if(playerLava)threats.push({pos:playerPos});if(threats.length){let t=threats.sort((a,b)=>n.pos.distanceTo(a.pos||a.root.position)-n.pos.distanceTo(b.pos||b.root.position))[0],tp=t.pos||t.root.position;if(n.pos.distanceTo(tp)<10)target=n.pos.clone().sub(tp).normalize().multiplyScalar(10).add(n.pos)}}}
+   else if(gameMode==='icetag'){if(n.ice&&!playerIce)target=playerPos;else if(!n.ice){const threats=npcs.filter(x=>x.ice);if(playerIce)threats.push({pos:playerPos});if(threats.length){let t=threats[0],tp=t.pos||t.root.position;if(n.pos.distanceTo(tp)<10)target=n.pos.clone().sub(tp).normalize().multiplyScalar(10).add(n.pos)}}}
+   if(!target||!Number.isFinite(target.x))target=new THREE.Vector3((Math.random()-.5)*42,0,(Math.random()-.5)*42);n.target.copy(target);
+  }
+  let dir=n.target.clone().sub(n.pos);dir.y=0;if(dir.lengthSq()>.1)dir.normalize();const chased=(gameMode==='infection'&&!n.lava)||(gameMode==='icetag'&&!n.ice);let speed=chased?3.5:2.4;if((n.lava||n.ice))speed=3.8;if(n.stuck>.5){dir.applyAxisAngle(new THREE.Vector3(0,1,0),(Math.random()<.5?-1:1)*Math.PI*.55);n.target.copy(n.pos).addScaledVector(dir,8);n.vy=4.5;n.stuck=0}
+  moveNPC(n,dir,speed,dt);n.anim+=dt*speed*2.2;const swing=Math.sin(n.anim)*.55;n.model.arms[0].shoulder.rotation.x=swing;n.model.arms[1].shoulder.rotation.x=-swing;n.model.body.position.y=.75+Math.abs(Math.sin(n.anim))*.035;
+ }
+ // Tag contacts
+ if(gameMode==='infection'||gameMode==='icetag')for(const n of npcs){const d=n.pos.distanceTo(playerPos);if(d<.9&&freezeTime<=0){if(gameMode==='infection'&&n.lava&&!playerLava)tagPlayer('lava');if(gameMode==='icetag'&&n.ice&&!playerIce){for(const x of npcs){x.ice=false;npcTint(x)}n.ice=false;npcTint(n);tagPlayer('ice')}}for(const o of npcs){if(o===n||o.freeze>0)continue;if(n.pos.distanceTo(o.pos)<.8){if(gameMode==='infection'&&n.lava&&!o.lava){o.lava=true;o.freeze=1.5;npcTint(o);snd.tag()}if(gameMode==='icetag'&&n.ice&&!o.ice){for(const x of npcs)x.ice=false;o.ice=true;o.freeze=2;npcTint(o);snd.freeze()}}}}
+}
+function resetModeActors(){playerLava=playerIce=false;freezeTime=0;for(const n of npcs){n.lava=n.ice=false;n.freeze=0;npcTint(n)}refreshTint();if(gameMode==='infection'){const pick=Math.floor(Math.random()*(npcs.length+1));if(pick===npcs.length)playerLava=true;else{npcs[pick].lava=true;npcTint(npcs[pick])}}if(gameMode==='icetag'){const pick=Math.floor(Math.random()*(npcs.length+1));if(pick===npcs.length)playerIce=true;else{npcs[pick].ice=true;npcTint(npcs[pick])}}refreshTint();refreshUI()}
+function tagPlayer(type){freezeTime=3;if(type==='lava'){playerLava=true;playerIce=false;snd.tag()}else{playerIce=true;playerLava=false;snd.freeze()}refreshTint();say(type==='lava'?'TAGGED! Frozen for 3 seconds.':'FROZEN! 3 seconds.',3);refreshUI()}
+
+// ------------------------------------------------------------
+// CORE GORILLA LOCOMOTION: no calibration room, no magnetic anchor
+// ------------------------------------------------------------
+const velocity=new THREE.Vector3();let grounded=true,wasGrounded=true;const HAND_RADIUS=.135,BODY_RADIUS=.25,GRAVITY=12.5;let currentArea='hub';
+function handContact(h,deltaWorld){const q=nearestSurface(h.world,currentArea,HAND_RADIUS+.055,true);if(!q)return null;const inward=deltaWorld.dot(q.normal)<-.0015,near=q.distance<=HAND_RADIUS+.035,penetrating=q.distance<=HAND_RADIUS+.012;const keep=h.touch&&near&&deltaWorld.dot(q.normal)<.018;if((penetrating&&(inward||h.touch))||keep)return q;return null}
+function resolveBody(){for(let pass=0;pass<2;pass++){const head=new THREE.Vector3();camera.getWorldPosition(head);const centers=[new THREE.Vector3(head.x,Math.max(rig.position.y+.72,head.y-.72),head.z),head.clone()];const radii=[BODY_RADIUS,.16];for(let j=0;j<centers.length;j++){for(const c of colliders[currentArea]){if(!c.solid)continue;const q=queryCollider(centers[j],c);if(q.distance<radii[j]&&Math.abs(q.normal.y)<.72){const push=q.normal.clone().multiplyScalar(radii[j]-q.distance+.002);push.y=0;rig.position.add(push);centers[j].add(push)}}}}}
+function updateLocomotion(dt){
+ if(freezeTime>0){freezeTime=Math.max(0,freezeTime-dt);velocity.set(0,0,0);return}
+ let corrections=new THREE.Vector3(),contacts=0,pushVelocity=new THREE.Vector3();
+ for(const h of hands){h.grip.getWorldPosition(h.raw);const local=rig.worldToLocal(h.raw.clone());if(!h.ready){h.smooth.copy(local);h.prev.copy(local);h.ready=true}const speed=local.distanceTo(h.smooth)/Math.max(dt,.001),alpha=1-Math.exp(-dt*(speed>1.4?34:20));h.smooth.lerp(local,alpha);h.world.copy(rig.localToWorld(h.smooth.clone()));h.hand.position.copy(h.world);
+  const deltaLocal=h.smooth.clone().sub(h.prev);const deltaWorld=deltaLocal.clone().applyQuaternion(rig.quaternion);if(deltaWorld.length()>.16)deltaWorld.setLength(.16);const q=handContact(h,deltaWorld);const touching=!!q;
+  if(touching){if(!h.touch)snd.touch();h.normal.copy(q.normal);let correction=deltaWorld.clone().multiplyScalar(-1);const penetration=Math.max(0,HAND_RADIUS-q.distance);correction.addScaledVector(q.normal,penetration*.72);corrections.add(correction);pushVelocity.addScaledVector(correction,1/Math.max(dt,.001));contacts++}
+  h.touch=touching;h.hand.scale.setScalar(touching?.155:.14);h.prev.copy(h.smooth)
+ }
+ if(contacts){corrections.divideScalar(contacts);pushVelocity.divideScalar(contacts);if(corrections.length()>.21)corrections.setLength(.21);rig.position.add(corrections);const blend=1-Math.exp(-dt*9);velocity.lerp(pushVelocity,blend);velocity.clampLength(0,7.2)}
+ velocity.y-=GRAVITY*dt;const carry=contacts?.16:1;rig.position.addScaledVector(velocity,dt*carry);resolveBody();
+ const head=new THREE.Vector3();camera.getWorldPosition(head);const sup=supportAt(head.x,head.z,rig.position.y,currentArea);wasGrounded=grounded;grounded=false;if(sup&&rig.position.y<=sup.y+.10&&velocity.y<=0){rig.position.y=sup.y;velocity.y=0;grounded=true;if(sup.collider.tag==='slide'&&sup.collider.mesh.userData.down){velocity.addScaledVector(sup.collider.mesh.userData.down,5.5*dt)}}
+ if(grounded){velocity.x*=Math.pow(.55,dt);velocity.z*=Math.pow(.55,dt)}else{velocity.x*=Math.pow(.86,dt);velocity.z*=Math.pow(.86,dt)}if(!wasGrounded&&grounded)snd.land();
+ // Safe recovery: no falling forever or leaving the map
+ if(rig.position.y<-4||Math.abs(rig.position.x)>48||Math.abs(rig.position.z)>48||![rig.position.x,rig.position.y,rig.position.z].every(Number.isFinite))teleport(currentArea,true);
+ // Lava trigger and finish
+ if(currentArea==='lava'){if(rig.position.y<.05)teleport('lava',true);const hp=new THREE.Vector3();camera.getWorldPosition(hp);if(hp.z<-25&&hp.y>7.5&&!goal.userData.claimed){goal.userData.claimed=true;points+=20;drawScore();snd.point();say('COURSE COMPLETE! +20 points',3);setTimeout(()=>goal.userData.claimed=false,5000)}}
+}
+
+function checkPlayerTags(){
+ if(gameMode==='casual'||(!playerLava&&!playerIce)||!npcVisible())return;
+ for(const n of npcs){
+  if(n.freeze>0)continue;
+  const chest=n.pos.clone().add(new THREE.Vector3(0,1.0,0));
+  const touched=hands.some(h=>h.world.distanceTo(chest)<.68);
+  if(!touched)continue;
+  if(gameMode==='infection'&&playerLava&&!n.lava){n.lava=true;n.freeze=1.2;npcTint(n);points+=1;drawScore();snd.tag();say(`Tagged ${n.name}! +1`,1.1)}
+  if(gameMode==='icetag'&&playerIce&&!n.ice){for(const x of npcs){x.ice=false;npcTint(x)}playerIce=false;n.ice=true;n.freeze=2;npcTint(n);refreshTint();snd.freeze();say(`${n.name} is the Ice Tagger!`,1.2);refreshUI()}
+ }
+}
+
+// Desktop fallback
+const keys={};let yaw=0,pitch=0,locked=false;addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='Space'&&grounded){velocity.y=6.2;grounded=false;snd.jump()}if(e.code==='KeyM')toggleMenu()});addEventListener('keyup',e=>keys[e.code]=false);renderer.domElement.addEventListener('click',()=>{enableAudio();if(!renderer.xr.isPresenting)renderer.domElement.requestPointerLock?.()});document.addEventListener('pointerlockchange',()=>locked=document.pointerLockElement===renderer.domElement);document.addEventListener('mousemove',e=>{if(!locked||renderer.xr.isPresenting)return;yaw-=e.movementX*.0022;pitch=THREE.MathUtils.clamp(pitch-e.movementY*.002,-1.3,1.3);camera.rotation.set(pitch,yaw,0,'YXZ')});
+function updateDesktop(dt){if(freezeTime>0){freezeTime=Math.max(0,freezeTime-dt);return}const f=new THREE.Vector3(Math.sin(yaw),0,-Math.cos(yaw)),r=new THREE.Vector3(Math.cos(yaw),0,Math.sin(yaw)),w=new THREE.Vector3();if(keys.KeyW)w.add(f);if(keys.KeyS)w.sub(f);if(keys.KeyD)w.add(r);if(keys.KeyA)w.sub(r);if(w.lengthSq()){w.normalize();rig.position.addScaledVector(w,(keys.ShiftLeft?7:4.5)*dt)}velocity.y-=GRAVITY*dt;rig.position.addScaledVector(velocity,dt);resolveBody();const head=new THREE.Vector3();camera.getWorldPosition(head);const sup=supportAt(head.x,head.z,rig.position.y,currentArea);grounded=false;if(sup&&rig.position.y<=sup.y+.12&&velocity.y<=0){rig.position.y=sup.y;velocity.y=0;grounded=true}if(rig.position.y<-4)teleport(currentArea,true)}
+
+// ------------------------------------------------------------
+// MENU: X button or left thumb-stick click; touch buttons with either hand
+// ------------------------------------------------------------
+const menu=new THREE.Group();menu.visible=false;scene.add(menu);let menuOpen=false,menuDebounce=false;const menuButtons=[];
+addBox; // keep parser happy in older browsers
+function menuButton(text,x,y,color,action){const b=new THREE.Mesh(GEO.box,material(color,.6));b.scale.set(.42,.16,.055);b.position.set(x,y,0);menu.add(b);const label=makeText(text,.76,.23,'#111923','#fff',34);label.position.set(x,y,.061);menu.add(label);menuButtons.push({mesh:b,action,cool:0})}
+const panel=new THREE.Mesh(GEO.box,material(0x162333,.7));panel.scale.set(2.15,1.35,.08);menu.add(panel);menuButton('CASUAL',-.62,.42,0x4d9cff,()=>setMode('casual'));menuButton('INFECTION',.18,.42,0xff6048,()=>setMode('infection'));menuButton('ICE TAG',.83,.42,0x68cfff,()=>setMode('icetag'));menuButton('HUB',-.72,.05,0x83df6e,()=>teleport('hub'));menuButton('FOREST',-.22,.05,0x50b95b,()=>teleport('forest'));menuButton('SNOW',.28,.05,0x8dd8ff,()=>teleport('snow'));menuButton('LAVA',.78,.05,0xff6538,()=>teleport('lava'));menuButton('SHOP',-.25,-.34,0xc88cff,()=>teleport('shop'));menuButton('CLOSE',.42,-.34,0xe9e9e9,()=>toggleMenu(false));
+function toggleMenu(force){menuOpen=force===undefined?!menuOpen:force;menu.visible=menuOpen;if(menuOpen){const p=new THREE.Vector3(),q=new THREE.Quaternion();camera.getWorldPosition(p);camera.getWorldQuaternion(q);const f=new THREE.Vector3(0,0,-1).applyQuaternion(q);menu.position.copy(p).addScaledVector(f,1.05);menu.position.y-=.12;menu.quaternion.copy(q);say('Menu opened',.8)}snd.button()}
+function updateMenu(dt){for(const b of menuButtons)b.cool=Math.max(0,b.cool-dt);if(!menuOpen)return;for(const h of hands)for(const b of menuButtons){const box=new THREE.Box3().setFromObject(b.mesh).expandByScalar(.06);if(b.cool<=0&&box.containsPoint(h.world)){b.cool=.55;b.action();snd.button();return}}}
+function pollX(){if(!renderer.xr.isPresenting)return;const session=renderer.xr.getSession();let pressed=false;for(const src of session.inputSources){if(src.handedness!=='left'||!src.gamepad)continue;const b=src.gamepad.buttons;pressed=!!(b[4]?.pressed||b[3]?.pressed)}if(pressed&&!menuDebounce)toggleMenu();menuDebounce=pressed}
+
+// ------------------------------------------------------------
+// AREA / MODE / PORTALS
+// ------------------------------------------------------------
+function setAreaVisible(name){for(const [k,g] of Object.entries(areaGroups))g.visible=k===name;mirrorProxy.root.visible=name==='shop'}
+function teleport(name,silent=false){currentArea=name;setAreaVisible(name);rig.position.copy(spawn[name]);velocity.set(0,0,0);for(const h of hands)h.ready=false;toggleMenu(false);if(!silent)say(`Entered ${name.toUpperCase()}`,1.2);refreshUI()}
+function setMode(mode){gameMode=mode;resetModeActors();toggleMenu(false);say(mode==='casual'?'Casual: no tagger.':mode==='infection'?'Infection started.':'Ice Tag started.',1.5)}
+function refreshUI(){ui.map.textContent=currentArea[0].toUpperCase()+currentArea.slice(1);ui.mode.textContent=gameMode==='icetag'?'Ice Tag':gameMode[0].toUpperCase()+gameMode.slice(1);ui.role.textContent=playerLava?'Lava Monkey':playerIce?'Ice Tagger':'Normal';ui.points.textContent=points}
+function updatePortals(dt){const head=new THREE.Vector3();camera.getWorldPosition(head);for(const p of portals){p.cool=Math.max(0,p.cool-dt);if(p.area===currentArea&&p.cool<=0&&head.distanceTo(p.pos)<1.35){p.cool=1;teleport(p.target)}}}
+
+// ------------------------------------------------------------
+// XR SESSION
+// ------------------------------------------------------------
+renderer.xr.addEventListener('sessionstart',()=>{enableAudio();ui.cross.style.display='none';camera.position.set(0,0,0);teleport('hub',true);for(const h of hands){h.ready=false;h.hand.visible=true}say('VR ready. Push the ground — no calibration room.',2.5)});
+renderer.xr.addEventListener('sessionend',()=>{ui.cross.style.display='';camera.position.set(0,1.65,4);for(const h of hands)h.hand.visible=false;for(const a of armMeshes){a.upper.visible=a.lower.visible=false}score.visible=false});
+
+// ------------------------------------------------------------
+// MAIN LOOP
+// ------------------------------------------------------------
+window.addEventListener('error',e=>{console.error(e.error||e.message);say('A script error was caught. Returning to Hub.',3)});window.addEventListener('unhandledrejection',e=>{console.error(e.reason);say('A browser error was caught.',3)});
+setAreaVisible('hub');refreshUI();resetModeActors();
+const clock=new THREE.Clock();let aiAccum=0;
+renderer.setAnimationLoop(()=>{
+ const dt=Math.min(clock.getDelta(),.033);if(msgTime>0){msgTime-=dt;if(msgTime<=0)ui.msg.textContent=''}
+ pollX();if(renderer.xr.isPresenting)updateLocomotion(dt);else updateDesktop(dt);checkPlayerTags();updatePlayerVisual();updateScorePosition();updateMenu(dt);updatePortals(dt);updateMirror();
+ aiAccum+=dt;if(aiAccum>=.033){updateNPCs(aiAccum);aiAccum=0}updateMusic(dt);refreshUI();renderer.render(scene,camera)
+});
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+</script>
+</body>
+</html>
